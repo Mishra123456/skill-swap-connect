@@ -22,6 +22,8 @@ import CommunityGuidelines from "./pages/CommunityGuidelines";
 import ContactPage from "./pages/ContactPage";
 import CommunicationHub from "./pages/CommunicationHub";
 import Journey from "./pages/Journey";
+import Privacy from "./pages/Privacy";
+import Terms from "./pages/Terms";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -79,6 +81,8 @@ const AppRoutes = () => (
     <Route path="/safety" element={<ProtectedRoute><SafetyCenter /></ProtectedRoute>} />
     <Route path="/guidelines" element={<ProtectedRoute><CommunityGuidelines /></ProtectedRoute>} />
     <Route path="/contact" element={<ProtectedRoute><ContactPage /></ProtectedRoute>} />
+    <Route path="/privacy" element={<ProtectedRoute><Privacy /></ProtectedRoute>} />
+    <Route path="/terms" element={<ProtectedRoute><Terms /></ProtectedRoute>} />
     <Route path="/messages" element={<ProtectedRoute><CommunicationHub /></ProtectedRoute>} />
     <Route path="/journey" element={<ProtectedRoute><Journey /></ProtectedRoute>} />
     <Route path="*" element={<NotFound />} />
