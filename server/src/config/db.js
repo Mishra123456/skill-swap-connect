@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
 const path = require("path");
 const fs = require("fs");
 
@@ -13,6 +12,7 @@ const connectDB = async () => {
     console.warn(`Cloud MongoDB connection failed: ${error.message}`);
     console.log("Starting local in-memory MongoDB server as fallback...");
     try {
+      const { MongoMemoryServer } = require("mongodb-memory-server");
       const dbBaseDir = path.join(__dirname, "../../.db-data");
       
       // Clean up previous run directories to avoid clutter
