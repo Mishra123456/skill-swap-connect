@@ -12,8 +12,20 @@ const sessionRoutes = require('./routes/session.routes');
 const app = express();
 const fs = require('fs');
 
-app.use(cors());
+// Custom CORS middleware to manually set headers for all requests and preflights
 app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(204);
+    }
+    next();
+});
+
+app.use((req, res, next) => {
+
     const logPath = path.join(__dirname, '../debug.log');
     const timestamp = new Date().toISOString();
     const msg = `[${timestamp}] [GLOBAL] ${req.method} ${req.url}\n`;
