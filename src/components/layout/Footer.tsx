@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { Repeat, Heart, Github, Twitter, Sparkles } from 'lucide-react';
+import { Repeat, Heart, Github, Sparkles } from 'lucide-react';
 
 const Footer = () => {
   return (
@@ -22,13 +22,9 @@ const Footer = () => {
             </p>
             <div className="flex items-center gap-4">
               <a
-                href="#"
-                className="p-2 rounded-xl bg-slate-800/50 text-gray-400 hover:bg-indigo-500/10 hover:text-indigo-400 transition-all duration-300"
-              >
-                <Twitter className="h-5 w-5" />
-              </a>
-              <a
-                href="#"
+                href="https://github.com/Mishra123456/skill-swap-connect"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="p-2 rounded-xl bg-slate-800/50 text-gray-400 hover:bg-indigo-500/10 hover:text-indigo-400 transition-all duration-300"
               >
                 <Github className="h-5 w-5" />
