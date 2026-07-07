@@ -31,5 +31,7 @@ server/.env.local
 .db-data
 .db-data/
 server/.db-data/
-server/.db-data
+# Local powershell execution wrapper
+powershell.cmd
+
 

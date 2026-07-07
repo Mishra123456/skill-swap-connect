@@ -93,11 +93,6 @@ const Footer = () => {
 
         <div className="border-t border-white/10 mt-12 pt-8">
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
-            <p className="text-sm text-gray-500 flex items-center gap-2">
-              © {new Date().getFullYear()} SkillSwap. Built with
-              <Heart className="h-4 w-4 text-red-500 fill-red-500 animate-pulse" />
-              for lifelong learners.
-            </p>
             <div className="flex items-center gap-6 text-sm text-gray-500">
               <a href="#" className="hover:text-indigo-400 transition-colors">Privacy</a>
               <a href="#" className="hover:text-indigo-400 transition-colors">Terms</a>
