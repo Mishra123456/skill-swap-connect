@@ -173,6 +173,12 @@ exports.sendMessage = async (req, res) => {
 
         await message.populate('senderId', 'name');
 
+        // Broadcast real-time message via socket
+        const io = req.app.get('io');
+        if (io) {
+            io.to(matchId).emit('receive-message', message);
+        }
+
         res.status(201).json({
             success: true,
             data: { message }
@@ -243,6 +249,12 @@ exports.uploadImage = async (req, res) => {
         });
 
         await message.populate('senderId', 'name');
+
+        // Broadcast real-time message via socket
+        const io = req.app.get('io');
+        if (io) {
+            io.to(matchId).emit('receive-message', message);
+        }
 
         res.status(201).json({
             success: true,
@@ -315,6 +327,12 @@ exports.uploadVideo = async (req, res) => {
         });
 
         await message.populate('senderId', 'name');
+
+        // Broadcast real-time message via socket
+        const io = req.app.get('io');
+        if (io) {
+            io.to(matchId).emit('receive-message', message);
+        }
 
         res.status(201).json({
             success: true,
