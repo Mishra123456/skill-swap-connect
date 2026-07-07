@@ -129,15 +129,18 @@ router.get('/match/:matchId/voice', protect, chatController.getActiveVoiceSessio
 router.post('/match/:matchId/voice', protect, chatController.createVoiceSession);
 
 // Join voice session
-router.post('/voice/:sessionId/join', protect, chatController.joinVoiceSession);
+router.post('/voice/session/:sessionId/join', protect, chatController.joinVoiceSession);
 
-// Update voice session
-router.patch('/voice/:sessionId', protect, chatController.updateVoiceSession);
+// Update voice session (accepts both PUT and PATCH)
+router.route('/voice/session/:sessionId')
+    .put(protect, chatController.updateVoiceSession)
+    .patch(protect, chatController.updateVoiceSession);
 
 // Leave voice session
-router.post('/voice/:sessionId/leave', protect, chatController.leaveVoiceSession);
+router.post('/voice/session/:sessionId/leave', protect, chatController.leaveVoiceSession);
 
 // End voice session
-router.post('/voice/:sessionId/end', protect, chatController.endVoiceSession);
+router.post('/voice/session/:sessionId/end', protect, chatController.endVoiceSession);
 
 module.exports = router;
+
