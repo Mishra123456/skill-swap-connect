@@ -6,10 +6,12 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import { api, Message, Match, CommunicationStatus, VoiceSession } from '@/lib/api';
+import { io, Socket } from 'socket.io-client';
 import {
     Send,
     Image as ImageIcon,
     Video,
+    VideoOff,
     Mic,
     MicOff,
     Phone,
@@ -27,7 +29,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const API_BASE = 'http://127.0.0.1:5000';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5001';
 
 interface ChatProps {
     embedded?: boolean;
@@ -48,33 +50,112 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
     const [match, setMatch] = useState<Match | null>(null);
     const [commStatus, setCommStatus] = useState<CommunicationStatus | null>(null);
     const [voiceSession, setVoiceSession] = useState<VoiceSession | null>(null);
-    const [voiceStatus, setVoiceStatus] = useState<'idle' | 'connecting' | 'live' | 'ended'>('idle');
-    const [isMuted, setIsMuted] = useState(false);
     const [showMenu, setShowMenu] = useState<string | null>(null);
     const [isUploading, setIsUploading] = useState(false);
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
 
+    // Call state: 'idle' | 'calling' | 'incoming' | 'live'
+    const [callState, setCallState] = useState<'idle' | 'calling' | 'incoming' | 'live'>('idle');
+    const [callType, setCallType] = useState<'voice' | 'video'>('voice');
+    const [isMuted, setIsMuted] = useState(false);
+    const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+    const [incomingCallData, setIncomingCallData] = useState<{ offer: RTCSessionDescriptionInit; socketId: string } | null>(null);
+
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const videoInputRef = useRef<HTMLInputElement>(null);
-    const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+    const socketRef = useRef<Socket | null>(null);
+    const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+    const localStreamRef = useRef<MediaStream | null>(null);
+    const remoteStreamRef = useRef<MediaStream | null>(null);
+    const localVideoRef = useRef<HTMLVideoElement | null>(null);
+    const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
     const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, []);
 
-    // Load initial data
+    // Set up Socket.io connection and listeners
     useEffect(() => {
-        if (matchId) {
-            loadChatData();
-            // Poll for new messages every 3 seconds
-            pollIntervalRef.current = setInterval(loadMessages, 3000);
-        }
+        if (!matchId) return;
+
+        loadChatData();
+
+        // Connect to Socket.io Server
+        const socket = io(API_BASE);
+        socketRef.current = socket;
+
+        socket.emit('join-room', matchId);
+
+        // Real-time chat events
+        socket.on('receive-message', (message: Message) => {
+            setMessages(prev => {
+                if (prev.some(m => m._id === message._id)) return prev;
+                return [...prev, message];
+            });
+        });
+
+        // WebRTC signaling events
+        socket.on('call-made', async ({ offer, socketId, type }) => {
+            console.log('Incoming call received of type:', type);
+            setIncomingCallData({ offer, socketId });
+            setCallType(type);
+            setCallState('incoming');
+        });
+
+        socket.on('answer-made', async ({ answer }) => {
+            console.log('Call answered');
+            if (peerConnectionRef.current) {
+                await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+                setCallState('live');
+            }
+        });
+
+        socket.on('ice-candidate-received', async ({ candidate }) => {
+            if (peerConnectionRef.current) {
+                try {
+                    await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+                } catch (e) {
+                    console.error('Error adding ICE candidate:', e);
+                }
+            }
+        });
+
+        socket.on('call-rejected', () => {
+            cleanupCall();
+            toast({
+                title: 'Call Declined',
+                description: 'The other participant declined your call.',
+                variant: 'destructive',
+            });
+        });
+
+        socket.on('call-ended', () => {
+            cleanupCall();
+            toast({
+                title: 'Call Ended',
+                description: 'The call has been ended by the other participant.',
+            });
+        });
+
+        socket.on('user-left', () => {
+            cleanupCall();
+            toast({
+                title: 'Peer Disconnected',
+                description: 'The other participant left the call.',
+            });
+        });
 
         return () => {
-            if (pollIntervalRef.current) {
-                clearInterval(pollIntervalRef.current);
-            }
+            socket.off('receive-message');
+            socket.off('call-made');
+            socket.off('answer-made');
+            socket.off('ice-candidate-received');
+            socket.off('call-rejected');
+            socket.off('call-ended');
+            socket.off('user-left');
+            socket.disconnect();
+            cleanupCall();
         };
     }, [matchId]);
 
@@ -92,14 +173,6 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
             if (statusResponse.success && statusResponse.data) {
                 setMatch(statusResponse.data.match);
                 setCommStatus(statusResponse.data.communicationStatus);
-
-                if (statusResponse.data.activeVoiceSession) {
-                    const voiceResponse = await api.chat.getActiveVoiceSession(matchId);
-                    if (voiceResponse.success && voiceResponse.data?.session) {
-                        setVoiceSession(voiceResponse.data.session);
-                        setVoiceStatus(voiceResponse.data.session.status);
-                    }
-                }
             }
 
             await loadMessages();
@@ -124,7 +197,7 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                 setCommStatus(response.data.communicationStatus);
             }
         } catch (error) {
-            // Silent fail for polling
+            // Polling fallback logs
         }
     };
 
@@ -154,7 +227,6 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
         const file = e.target.files?.[0];
         if (!file || !matchId) return;
 
-        // Validate file size (5MB max)
         if (file.size > 5 * 1024 * 1024) {
             toast({
                 title: 'File too large',
@@ -186,7 +258,6 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
         const file = e.target.files?.[0];
         if (!file || !matchId) return;
 
-        // Validate file size (50MB max)
         if (file.size > 50 * 1024 * 1024) {
             toast({
                 title: 'File too large',
@@ -247,78 +318,217 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
         }
     };
 
-    // Voice Chat Handlers
-    const handleStartVoiceChat = async () => {
-        if (!matchId) return;
+    // --- WebRTC Peer Connection Core Logic ---
+
+    const createPeerConnection = () => {
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
+            ]
+        });
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate && socketRef.current && matchId) {
+                socketRef.current.emit('ice-candidate', { roomId: matchId, candidate: event.candidate });
+            }
+        };
+
+        pc.ontrack = (event) => {
+            console.log(' ontack event fired');
+            if (event.streams && event.streams[0]) {
+                remoteStreamRef.current = event.streams[0];
+                if (remoteVideoRef.current) {
+                    remoteVideoRef.current.srcObject = event.streams[0];
+                }
+            }
+        };
+
+        peerConnectionRef.current = pc;
+        return pc;
+    };
+
+    // Caller initiates Voice or Video call
+    const startCall = async (type: 'voice' | 'video') => {
+        if (!matchId || !socketRef.current) return;
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            toast({
+                title: 'Hardware Access Denied',
+                description: 'Your browser or device does not support WebRTC media capture.',
+                variant: 'destructive',
+            });
+            return;
+        }
 
         try {
-            setVoiceStatus('connecting');
-            const response = await api.chat.createVoiceSession(matchId);
+            setCallState('calling');
+            setCallType(type);
 
+            // Capture Audio & optional Video
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: type === 'video'
+            });
+
+            localStreamRef.current = stream;
+            if (localVideoRef.current) {
+                localVideoRef.current.srcObject = stream;
+            }
+
+            const pc = createPeerConnection();
+
+            // Add local tracks to peer connection
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            // Create Offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // Send Signaling Offer
+            socketRef.current.emit('call-user', { roomId: matchId, offer, type });
+
+            // Create DB session entry (for logging/statistics)
+            const response = await api.chat.createVoiceSession(matchId);
             if (response.success && response.data) {
                 setVoiceSession(response.data.session);
-
-                // Join the session
                 await api.chat.joinVoiceSession(response.data.session._id);
-
-                // Update to live status
-                await api.chat.updateVoiceSession(response.data.session._id, 'live', 'connected');
-                setVoiceStatus('live');
-
-                toast({
-                    title: 'Voice chat started',
-                    description: 'Waiting for the other person to join...',
-                });
             }
         } catch (error) {
-            setVoiceStatus('idle');
+            console.error('Call initialization failed:', error);
+            cleanupCall();
             toast({
-                title: 'Failed to start voice chat',
-                description: error instanceof Error ? error.message : 'Something went wrong',
+                title: 'Device Access Blocked',
+                description: 'Could not access microphone/camera. Please check permissions.',
                 variant: 'destructive',
             });
         }
     };
 
-    const handleEndVoiceChat = async () => {
-        if (!voiceSession) return;
+    // Receiver accepts incoming call
+    const acceptCall = async () => {
+        if (!matchId || !socketRef.current || !incomingCallData) return;
 
         try {
-            await api.chat.endVoiceSession(voiceSession._id);
-            setVoiceSession(null);
-            setVoiceStatus('idle');
-            setIsMuted(false);
-
-            toast({
-                title: 'Voice chat ended',
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: callType === 'video'
             });
+
+            localStreamRef.current = stream;
+            if (localVideoRef.current) {
+                localVideoRef.current.srcObject = stream;
+            }
+
+            const pc = createPeerConnection();
+
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            await pc.setRemoteDescription(new RTCSessionDescription(incomingCallData.offer));
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            socketRef.current.emit('make-answer', { roomId: matchId, answer });
+
+            setCallState('live');
+
+            // Find and register connection to active session in database
+            const activeSessionRes = await api.chat.getActiveVoiceSession(matchId);
+            if (activeSessionRes.success && activeSessionRes.data?.session) {
+                setVoiceSession(activeSessionRes.data.session);
+                await api.chat.joinVoiceSession(activeSessionRes.data.session._id);
+                await api.chat.updateVoiceSession(activeSessionRes.data.session._id, 'live', 'connected');
+            }
+
+            setIncomingCallData(null);
         } catch (error) {
+            console.error('Accepting call failed:', error);
+            cleanupCall();
             toast({
-                title: 'Failed to end voice chat',
-                description: error instanceof Error ? error.message : 'Something went wrong',
+                title: 'Failed to Connect',
+                description: 'An error occurred while linking audio/video streams.',
                 variant: 'destructive',
             });
         }
     };
 
-    const handleToggleMute = async () => {
-        if (!voiceSession) return;
+    // Receiver rejects incoming call
+    const rejectCall = () => {
+        if (socketRef.current && matchId) {
+            socketRef.current.emit('reject-call', { roomId: matchId });
+        }
+        cleanupCall();
+    };
 
-        const newMutedState = !isMuted;
-        setIsMuted(newMutedState);
+    // Either user terminates active call
+    const endCall = async () => {
+        if (socketRef.current && matchId) {
+            socketRef.current.emit('end-call', { roomId: matchId });
+        }
 
-        try {
-            await api.chat.updateVoiceSession(
-                voiceSession._id,
-                undefined,
-                newMutedState ? 'muted' : 'connected'
-            );
-        } catch (error) {
-            setIsMuted(!newMutedState);
+        if (voiceSession) {
+            try {
+                await api.chat.endVoiceSession(voiceSession._id);
+            } catch (e) {
+                console.error('Failed to update DB voice session termination:', e);
+            }
+        }
+
+        cleanupCall();
+    };
+
+    // Release local hardware & peer connection resources
+    const cleanupCall = () => {
+        setCallState('idle');
+        setIncomingCallData(null);
+        setVoiceSession(null);
+        setIsMuted(false);
+        setIsVideoEnabled(true);
+
+        if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach(track => track.stop());
+            localStreamRef.current = null;
+        }
+        if (remoteStreamRef.current) {
+            remoteStreamRef.current.getTracks().forEach(track => track.stop());
+            remoteStreamRef.current = null;
+        }
+        if (peerConnectionRef.current) {
+            peerConnectionRef.current.close();
+            peerConnectionRef.current = null;
+        }
+        if (localVideoRef.current) {
+            localVideoRef.current.srcObject = null;
+        }
+        if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = null;
         }
     };
 
-    // Get the other user
+    const toggleMute = () => {
+        if (localStreamRef.current) {
+            const audioTrack = localStreamRef.current.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = !audioTrack.enabled;
+                setIsMuted(!audioTrack.enabled);
+            }
+        }
+    };
+
+    const toggleVideo = () => {
+        if (localStreamRef.current) {
+            const videoTrack = localStreamRef.current.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.enabled = !videoTrack.enabled;
+                setIsVideoEnabled(videoTrack.enabled);
+            }
+        }
+    };
+
+    // --- UI Render Helpers ---
+
     const otherUser = match
         ? (match.requester._id === user?._id ? match.provider : match.requester)
         : null;
@@ -392,6 +602,203 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
 
     const content = (
         <div className={`h-[calc(100vh-140px)] glass rounded-3xl border border-white/10 flex flex-col overflow-hidden relative ${embedded ? 'h-full border-0 rounded-none bg-transparent' : ''}`}>
+            
+            {/* --- CALL SCREEN OVERLAYS --- */}
+            
+            {/* Incoming Call Screen Overlay */}
+            <AnimatePresence>
+                {callState === 'incoming' && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 z-40 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center"
+                    >
+                        <div className="relative mb-6">
+                            <div className="absolute inset-0 rounded-full bg-emerald-500/20 animate-ping" />
+                            <div className="w-24 h-24 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-3xl font-bold shadow-2xl relative">
+                                {otherUser?.name.charAt(0)}
+                            </div>
+                        </div>
+
+                        <h3 className="text-2xl font-bold text-gray-100 mb-2">{otherUser?.name}</h3>
+                        <p className="text-gray-400 mb-8 text-sm animate-pulse">
+                            Incoming {callType === 'video' ? 'Video' : 'Voice'} Call...
+                        </p>
+
+                        <div className="flex gap-4">
+                            <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                                <Button
+                                    onClick={acceptCall}
+                                    className="bg-emerald-500 hover:bg-emerald-600 text-white px-8 py-6 rounded-full shadow-lg shadow-emerald-500/20 flex items-center gap-2 text-lg"
+                                >
+                                    <Phone className="h-6 w-6" /> Accept
+                                </Button>
+                            </motion.div>
+                            <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                                <Button
+                                    onClick={rejectCall}
+                                    variant="destructive"
+                                    className="px-8 py-6 rounded-full shadow-lg flex items-center gap-2 text-lg"
+                                >
+                                    <PhoneOff className="h-6 w-6" /> Decline
+                                </Button>
+                            </motion.div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Outgoing Dialing Screen Overlay */}
+            <AnimatePresence>
+                {callState === 'calling' && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 z-40 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center"
+                    >
+                        <div className="relative mb-6">
+                            <div className="absolute inset-0 rounded-full bg-indigo-500/20 animate-pulse" />
+                            <div className="w-24 h-24 rounded-full bg-slate-800 flex items-center justify-center text-white text-3xl font-bold shadow-2xl">
+                                {otherUser?.name.charAt(0)}
+                            </div>
+                        </div>
+
+                        <h3 className="text-2xl font-bold text-gray-100 mb-2">{otherUser?.name}</h3>
+                        <p className="text-gray-400 mb-8 text-sm flex items-center gap-2">
+                            Calling ({callType === 'video' ? 'Video' : 'Voice'})...
+                            <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+                        </p>
+
+                        <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                            <Button
+                                onClick={endCall}
+                                variant="destructive"
+                                className="px-8 py-6 rounded-full shadow-lg flex items-center gap-2 text-lg"
+                            >
+                                <PhoneOff className="h-6 w-6" /> Cancel
+                            </Button>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* Live WebRTC Call Screen Overlay */}
+            <AnimatePresence>
+                {callState === 'live' && (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="absolute inset-0 z-40 bg-slate-950 flex flex-col justify-between"
+                    >
+                        {/* Video Panel */}
+                        <div className="flex-1 relative bg-black flex items-center justify-center overflow-hidden">
+                            {callType === 'video' ? (
+                                <>
+                                    {/* Remote Stream Video */}
+                                    <video
+                                        ref={remoteVideoRef}
+                                        autoPlay
+                                        playsInline
+                                        className="w-full h-full object-cover"
+                                    />
+                                    
+                                    {/* Local Stream PIP Video */}
+                                    <div className="absolute top-4 right-4 w-32 sm:w-44 aspect-[3/4] rounded-2xl overflow-hidden border border-white/20 shadow-2xl z-50 bg-slate-900">
+                                        {isVideoEnabled ? (
+                                            <video
+                                                ref={localVideoRef}
+                                                autoPlay
+                                                playsInline
+                                                muted
+                                                className="w-full h-full object-cover scale-x-[-1]"
+                                            />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center text-gray-500 text-xs">
+                                                Camera Off
+                                            </div>
+                                        )}
+                                    </div>
+                                </>
+                            ) : (
+                                /* Voice Call UI Block (audio Wave) */
+                                <div className="text-center py-20">
+                                    <div className="w-28 h-28 rounded-full bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center text-white text-3xl font-bold shadow-2xl mx-auto mb-8">
+                                        {otherUser?.name.charAt(0)}
+                                    </div>
+                                    <h3 className="text-2xl font-semibold text-gray-100 mb-2">{otherUser?.name}</h3>
+                                    
+                                    {/* Animated audio waves */}
+                                    <div className="flex items-center justify-center gap-1.5 h-10 mt-6">
+                                        {[1, 2, 3, 4, 5, 6].map((i) => (
+                                            <motion.div
+                                                key={i}
+                                                animate={{ scaleY: [0.3, 1, 0.3] }}
+                                                transition={{
+                                                    duration: 0.8,
+                                                    repeat: Infinity,
+                                                    delay: i * 0.1,
+                                                    ease: "easeInOut"
+                                                }}
+                                                className="w-1.5 bg-indigo-400 rounded-full origin-center"
+                                                style={{ height: '32px' }}
+                                            />
+                                        ))}
+                                    </div>
+                                    <p className="text-sm text-gray-500 mt-4">Active Voice Call</p>
+                                </div>
+                            )}
+
+                            {/* Hidden element for audio-only track rendering */}
+                            {callType === 'voice' && (
+                                <audio ref={remoteVideoRef as any} autoPlay />
+                            )}
+                        </div>
+
+                        {/* In-Call Glassmorphic Control Bar */}
+                        <div className="bg-slate-900/80 backdrop-blur-md p-6 border-t border-white/5 flex items-center justify-center gap-4">
+                            {/* Mute Mic */}
+                            <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
+                                <Button
+                                    onClick={toggleMute}
+                                    variant="outline"
+                                    className={`w-14 h-14 rounded-full border-0 p-0 ${isMuted ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}`}
+                                >
+                                    {isMuted ? <MicOff className="h-6 w-6" /> : <Mic className="h-6 w-6" />}
+                                </Button>
+                            </motion.div>
+
+                            {/* Toggle Camera (Video Only) */}
+                            {callType === 'video' && (
+                                <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
+                                    <Button
+                                        onClick={toggleVideo}
+                                        variant="outline"
+                                        className={`w-14 h-14 rounded-full border-0 p-0 ${!isVideoEnabled ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}`}
+                                    >
+                                        {!isVideoEnabled ? <VideoOff className="h-6 w-6" /> : <Video className="h-6 w-6" />}
+                                    </Button>
+                                </motion.div>
+                            )}
+
+                            {/* End Call */}
+                            <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
+                                <Button
+                                    onClick={endCall}
+                                    className="w-14 h-14 rounded-full bg-red-600 hover:bg-red-700 text-white shadow-lg p-0"
+                                >
+                                    <PhoneOff className="h-6 w-6" />
+                                </Button>
+                            </motion.div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* --- STANDARD CHAT INTERFACE --- */}
+
             {/* Chat Header */}
             <div className="border-b border-white/10 bg-slate-900/50 backdrop-blur-md sticky top-0 z-10">
                 <div className="px-4 py-3">
@@ -419,7 +826,7 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                             </div>
                         </div>
 
-                        {/* Voice Chat Controls */}
+                        {/* Call Buttons in Chat Header */}
                         <div className="flex items-center gap-2">
                             {commStatus?.readOnly ? (
                                 <span className="text-xs text-amber-400 flex items-center gap-1 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20">
@@ -428,50 +835,29 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                                 </span>
                             ) : (
                                 <>
-                                    {voiceStatus === 'idle' && (
-                                        <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
-                                            <Button
-                                                size="sm"
-                                                onClick={handleStartVoiceChat}
-                                                className="bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white shadow-lg shadow-emerald-500/20"
-                                            >
-                                                <Phone className="h-4 w-4 mr-2" />
-                                                <span className="hidden sm:inline">Voice Chat</span>
-                                            </Button>
-                                        </motion.div>
-                                    )}
+                                    {/* Voice Call Button */}
+                                    <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                                        <Button
+                                            size="sm"
+                                            onClick={() => startCall('voice')}
+                                            className="bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white shadow-lg"
+                                        >
+                                            <Phone className="h-4 w-4 mr-1.5" />
+                                            <span className="hidden sm:inline">Voice Chat</span>
+                                        </Button>
+                                    </motion.div>
 
-                                    {(voiceStatus === 'connecting' || voiceStatus === 'live') && (
-                                        <div className="flex items-center gap-2">
-                                            <span className={`px-3 py-1 rounded-full text-xs font-medium hidden sm:block ${voiceStatus === 'connecting'
-                                                ? 'bg-amber-500/20 text-amber-400 animate-pulse'
-                                                : 'bg-emerald-500/20 text-emerald-400'
-                                                }`}>
-                                                {voiceStatus === 'connecting' ? 'Connecting...' : 'Live'}
-                                            </span>
-
-                                            <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
-                                                <Button
-                                                    size="sm"
-                                                    variant="outline"
-                                                    onClick={handleToggleMute}
-                                                    className={`${isMuted ? 'bg-red-500/20 border-red-500/30 text-red-400' : 'bg-slate-700/50 border-slate-600 text-gray-300'}`}
-                                                >
-                                                    {isMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                                                </Button>
-                                            </motion.div>
-
-                                            <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
-                                                <Button
-                                                    size="sm"
-                                                    onClick={handleEndVoiceChat}
-                                                    className="bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20"
-                                                >
-                                                    <PhoneOff className="h-4 w-4" />
-                                                </Button>
-                                            </motion.div>
-                                        </div>
-                                    )}
+                                    {/* Video Call Button */}
+                                    <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                                        <Button
+                                            size="sm"
+                                            onClick={() => startCall('video')}
+                                            className="bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white shadow-lg"
+                                        >
+                                            <Video className="h-4 w-4 mr-1.5" />
+                                            <span className="hidden sm:inline">Video Call</span>
+                                        </Button>
+                                    </motion.div>
                                 </>
                             )}
                         </div>
@@ -491,15 +877,15 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                             <p className="text-gray-500">Send a message to begin your skill exchange!</p>
                         </div>
                     ) : (
-                        messages.map((msg, index) => (
+                        messages.map((msg) => (
                             <motion.div
                                 key={msg._id}
                                 initial={{ opacity: 0, y: 10 }}
                                 animate={{ opacity: 1, y: 0 }}
-                                transition={{ delay: 0 }}
                                 className={`flex ${isOwnMessage(msg) ? 'justify-end' : 'justify-start'}`}
                             >
                                 <div className={`max-w-[85%] sm:max-w-[70%] relative group ${isOwnMessage(msg) ? 'order-1' : ''}`}>
+                                    
                                     {/* Message Bubble */}
                                     <div className={`rounded-2xl px-4 py-3 shadow-md ${msg.deleted
                                         ? 'bg-slate-800/50 text-gray-500 italic border border-white/5'
@@ -507,12 +893,11 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                                             ? 'bg-gradient-to-br from-indigo-600 to-indigo-500 text-white rounded-tr-none'
                                             : 'bg-slate-700/50 text-gray-200 rounded-tl-none border border-white/5'
                                         }`}>
-                                        {/* Text Message */}
+                                        
                                         {msg.type === 'text' && (
                                             <p className="whitespace-pre-wrap break-words text-sm sm:text-base leading-relaxed">{msg.content}</p>
                                         )}
 
-                                        {/* Image Message */}
                                         {msg.type === 'image' && msg.media && (
                                             <div
                                                 className="cursor-pointer overflow-hidden rounded-xl mt-1"
@@ -526,7 +911,6 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                                             </div>
                                         )}
 
-                                        {/* Video Message */}
                                         {msg.type === 'video' && msg.media && (
                                             <div className="rounded-xl overflow-hidden mt-1 bg-black/20">
                                                 <video
@@ -537,9 +921,7 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                                             </div>
                                         )}
 
-                                        {/* Timestamp & Status */}
-                                        <div className={`flex items-center gap-1 mt-1.5 text-[10px] sm:text-xs opacity-70 ${isOwnMessage(msg) ? 'text-indigo-100 justify-end' : 'text-gray-400'
-                                            }`}>
+                                        <div className={`flex items-center gap-1 mt-1.5 text-[10px] sm:text-xs opacity-70 ${isOwnMessage(msg) ? 'text-indigo-100 justify-end' : 'text-gray-400'}`}>
                                             <span>{formatTime(msg.createdAt)}</span>
                                             {isOwnMessage(msg) && (
                                                 msg.status === 'read'
@@ -605,7 +987,6 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                 <div className="border-t border-white/10 bg-slate-900/50 backdrop-blur-md p-4">
                     <div className="container mx-auto max-w-4xl">
                         <form onSubmit={handleSendMessage} className="flex items-end gap-2">
-                            {/* File Inputs (hidden) */}
                             <input
                                 ref={fileInputRef}
                                 type="file"
@@ -622,7 +1003,6 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                             />
 
                             <div className="flex gap-1 pb-1">
-                                {/* Upload Buttons */}
                                 <motion.div whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }}>
                                     <Button
                                         type="button"
@@ -650,7 +1030,6 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                                 </motion.div>
                             </div>
 
-                            {/* Message Input */}
                             <div className="flex-1 min-w-0">
                                 <Input
                                     value={newMessage}
@@ -659,14 +1038,12 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
                                     disabled={isSending || isUploading}
                                     className="w-full bg-slate-800/50 border-slate-600 text-gray-200 placeholder:text-gray-500 rounded-2xl focus:border-indigo-500 h-10"
                                 />
-                                {/* Safety Notice */}
                                 <p className="text-[10px] text-gray-500 mt-1 flex items-center gap-1 pl-1">
                                     <AlertTriangle className="h-3 w-3" />
                                     Keep communication in-app for safety.
                                 </p>
                             </div>
 
-                            {/* Send Button */}
                             <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} className="pb-1">
                                 <Button
                                     type="submit"
@@ -718,3 +1095,4 @@ const Chat: React.FC<ChatProps> = ({ embedded = false, matchIdProp }) => {
 };
 
 export default Chat;
+
