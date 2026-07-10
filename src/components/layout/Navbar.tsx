@@ -4,7 +4,6 @@ import { Repeat, Menu, X, Sparkles } from 'lucide-react';
 import { useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ModeToggle } from '@/components/ui/mode-toggle';
 
 const Navbar = () => {
   const location = useLocation();
@@ -81,7 +80,6 @@ const Navbar = () => {
           </div>
 
           <div className="hidden md:flex items-center gap-3">
-            <ModeToggle />
             {isAuthenticated ? (
               <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
                 <Button
@@ -149,10 +147,6 @@ const Navbar = () => {
                   </Link>
                 ))}
                 <div className="border-t border-border/50 my-2" />
-                <div className="flex items-center justify-between px-4 py-2">
-                  <span className="text-sm text-muted-foreground">Theme</span>
-                  <ModeToggle />
-                </div>
                 {isAuthenticated ? (
                   <Button
                     variant="outline"
