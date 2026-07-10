@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
+import { api } from '@/lib/api';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -60,7 +61,28 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
     const location = useLocation();
     const [isOpen, setIsOpen] = useState(false);
     const [isCollapsed, setIsCollapsed] = useState(false);
-    const [notifications, setNotifications] = useState(3); // Mock
+    const [notifications, setNotifications] = useState(0);
+
+    useEffect(() => {
+        const fetchNotifications = async () => {
+            if (!user) return;
+            try {
+                const response = await api.matches.getMyRequests();
+                if (response.success && response.data) {
+                    const pendingCount = response.data.matches.filter(
+                        (r: any) => r.status === 'pending'
+                    ).length;
+                    setNotifications(pendingCount);
+                }
+            } catch (error) {
+                console.error('Failed to fetch requests count:', error);
+            }
+        };
+
+        fetchNotifications();
+        const interval = setInterval(fetchNotifications, 15000);
+        return () => clearInterval(interval);
+    }, [user]);
 
     const handleLogout = () => {
         logout();
