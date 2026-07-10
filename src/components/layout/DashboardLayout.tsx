@@ -324,11 +324,6 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
                                             className="relative text-gray-400 hover:text-gray-200"
                                         >
                                             <Bell className="h-5 w-5" />
-                                            {notifications > 0 && (
-                                                <span className="absolute -top-1 -right-1 w-4 h-4 flex items-center justify-center text-xs bg-indigo-500 text-white rounded-full">
-                                                    {notifications}
-                                                </span>
-                                            )}
                                         </Button>
                                     </DropdownMenuTrigger>
                                     <DropdownMenuContent align="end" className="w-80">
